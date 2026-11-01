@@ -45,7 +45,10 @@ def test_programme_puts_new_shorts_first_and_updates_between():
 def test_programme_skips_bad_and_falls_back_to_updates():
     lib = FakeLibrary([short("a", "2026-11-01T09:00")])
     p = air.Programme(lib)
-    p.bad.add("a")
+    assert p.next()[0] == "short"
+    for _ in range(air.BENCH_AFTER):
+        p.failed("a")
+    p.since_update = 0
     assert p.next() == ("update", None)
     assert air.Programme(FakeLibrary([])).next() == ("update", None)
 
@@ -98,6 +101,34 @@ def test_librarian_takes_only_public_shorts_of_the_current_identity(monkeypatch)
     assert {k: v["video_id"] for k, v in got.items()} == {"s1": "v1", "s2": "v2"}
 
 
+def test_library_keeps_playing_through_bad_manifests(tmp_path):
+    ch = CHANNELS["orbitwire"]
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"video")
+    manifest = tmp_path / "library.json"
+    row = {"channel": "orbitwire", "video_id": "v1", "title": "t", "published_at": "2026-11-01", "url": clip.as_uri()}
+    manifest.write_text(json.dumps({"shorts": [row]}))
+    lib = sources.Library(ch, tmp_path / "home", manifest.as_uri())
+    lib.sync(0)
+    assert [m["video_id"] for m in lib.items] == ["v1"] and Path(lib.items[0]["path"]).read_bytes() == b"video"
+    for broken in ("{not json", json.dumps({"shorts": []}), json.dumps({"other": 1})):
+        manifest.write_text(broken)
+        lib.sync(0)
+        assert [m["video_id"] for m in lib.items] == ["v1"]
+    manifest.write_text(json.dumps({"shorts": [row | {"channel": "palpal"}, row | {"video_id": "v2"}]}))
+    lib.sync(0)
+    assert [m["video_id"] for m in lib.items] == ["v2"] and not (tmp_path / "home/library/v1.mp4").exists()
+    assert [m["video_id"] for m in sources.Library(ch, tmp_path / "home", manifest.as_uri()).items] == ["v2"]
+
+
+def test_corrupt_caches_start_empty(tmp_path):
+    ch = CHANNELS["palpal"]
+    (tmp_path / "library").mkdir()
+    (tmp_path / "sources.json").write_text('{"headlines": [')
+    (tmp_path / "library/index.json").write_text("[{")
+    assert sources.Desk(ch, tmp_path).headlines == [] and sources.Library(ch, tmp_path).items == []
+
+
 @pytest.mark.parametrize("key", sorted(CHANNELS))
 def test_frames_render(key):
     ch = CHANNELS[key]
@@ -110,3 +141,6 @@ def test_frames_render(key):
         assert img.size == (look.W, look.H) and img.getpixel((look.W // 2, look.H // 2))[3] == 0
     for page in segments.update_pages(ch, desk):
         assert look.update_page(ch, page, desk, AT, s).size == (look.W, look.H)
+    strip, (label, label_w) = look.ticker_strip(ch, desk), look.ticker_label(ch)
+    assert strip.height == label.height == look.TICKER_H and strip.width > look.W and 60 < label_w < 300
+    assert look.SHORT_W * 16 == look.SHORT_H * 9 and look.SHORT_W % 2 == 0

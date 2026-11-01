@@ -22,8 +22,11 @@ in Profile 6 (aksh.shivam17@gmail.com).
 
 In each channel's Studio, **Create** > **Go live** > **Stream** tab:
 
-- Title. Orbitwire: `Orbitwire LIVE: world news 24/7, headlines, earthquakes and every story`.
-  Pal Pal: `पल पल न्यूज़ LIVE: 24 घंटे ताज़ा हिंदी खबरें`.
+- Title. Big Hindi news channels lead live titles with the search words, then "LIVE", then the hook:
+  - Orbitwire: `World News LIVE 24/7: Breaking News, Top Headlines & Earthquakes | Orbitwire`
+  - Pal Pal: `Hindi News LIVE: आज की ताज़ा खबरें 24x7 | Breaking News | पल पल न्यूज़`
+- Description: first line repeats the title's search words, then `Subscribe: @orbitwirenews` (or
+  `@palpalnewshindi`).
 - Category **News & Politics**, audience "No, it's not made for kids".
 - Stream settings: **Enable auto-start** on, **Enable auto-stop off** (so a short restart never ends the live),
   DVR on, latency Normal.
@@ -49,4 +52,9 @@ publishing: the librarian collects them hourly, and the server checks every 30 m
 
 - The stream restarts itself if anything fails. To stop one channel, change its stream key in Studio
   ("Reset" the key) or stop the instance in Oracle.
+- The keys stay inside your Oracle account (the instance's cloud-init settings) and in root-only files on the
+  server. If anyone else ever gets access to that Oracle account, reset both keys in Studio.
+- To check on the server from Oracle's Cloud Shell or the instance console, use
+  `systemctl is-active live-desk@orbitwire live-desk@palpal` and `journalctl -u live-desk@orbitwire -n 50`.
+  Do not paste `systemctl status` output anywhere: it shows the stream key.
 - Oracle can reclaim Always Free machines that sit idle for 7 days; the live encoding keeps this one busy.

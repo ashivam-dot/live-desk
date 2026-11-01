@@ -9,9 +9,12 @@ import html
 import json
 import os
 import re
+import shutil
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -24,6 +27,8 @@ LIBRARY = os.environ.get("LIVE_DESK_LIBRARY",
                          "https://github.com/ashivam-dot/live-desk/releases/download/library/library.json")
 HEADLINE_MAX_AGE_H = 18
 REFRESH_S = 300
+FEED_TIMEOUT_S = 15
+REFRESH_DEADLINE_S = 45
 
 
 def get(url: str, timeout: float = 20) -> bytes:
@@ -93,39 +98,65 @@ def quakes_from(data: bytes, limit: int = 6) -> list[dict]:
     return sorted(rows, key=lambda r: -r["mag"])[:limit]
 
 
+def write_json(path: Path, data) -> None:
+    """Replace a file whole, so a crash mid-write never leaves half a file for the next start."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
 class Desk:
-    """What one channel's stream knows about the world right now."""
+    """What one channel's stream knows about the world right now. Lists are swapped whole, never edited in place,
+    so the encoder can read them while a refresh runs in another thread."""
 
     def __init__(self, ch: Channel, home: Path):
         self.ch, self.home = ch, home
         home.mkdir(parents=True, exist_ok=True)
         self.cache = home / "sources.json"
-        saved = json.loads(self.cache.read_text()) if self.cache.exists() else {}
-        self.headlines: list[dict] = saved.get("headlines", [])
-        self.quakes: list[dict] = saved.get("quakes", [])
+        saved = read_json(self.cache, {})
+        self.headlines: list[dict] = saved.get("headlines", []) if isinstance(saved, dict) else []
+        self.quakes: list[dict] = saved.get("quakes", []) if isinstance(saved, dict) else []
         self.errors: list[str] = []
         self.fetched = 0.0
+
+    def _feed(self, outlet: str, url: str) -> list[dict]:
+        cutoff = time.time() - HEADLINE_MAX_AGE_H * 3600
+        rows = parse_feed(get(url, timeout=FEED_TIMEOUT_S), outlet)
+        return [r for r in rows if not r["at"] or datetime.fromisoformat(r["at"]).timestamp() > cutoff]
 
     def refresh(self, force: bool = False) -> None:
         if not force and time.time() - self.fetched < REFRESH_S:
             return
-        self.fetched, self.errors = time.time(), []
-        lists = []
-        for outlet, url in self.ch.feeds:
-            try:
-                rows = parse_feed(get(url), outlet)
-                cutoff = time.time() - HEADLINE_MAX_AGE_H * 3600
-                lists.append([r for r in rows if not r["at"] or datetime.fromisoformat(r["at"]).timestamp() > cutoff])
-            except Exception as exc:  # one dead feed never blanks the page
-                self.errors.append(f"{outlet}: {type(exc).__name__}")
+        self.fetched, errors, lists = time.time(), [], []
+        pool = ThreadPoolExecutor(max_workers=8)
+        jobs = {pool.submit(self._feed, o, u): o for o, u in self.ch.feeds}
+        if self.ch.quakes:
+            jobs[pool.submit(lambda: quakes_from(get(USGS, timeout=FEED_TIMEOUT_S)))] = "USGS"
+        try:
+            for job in as_completed(jobs, timeout=REFRESH_DEADLINE_S):
+                try:
+                    rows = job.result()
+                except Exception as exc:  # one dead feed never blanks the page
+                    errors.append(f"{jobs[job]}: {type(exc).__name__}")
+                    continue
+                if jobs[job] == "USGS":
+                    self.quakes = rows
+                else:
+                    lists.append(rows)
+        except FuturesTimeout:
+            errors.append("some feeds too slow")
+        pool.shutdown(wait=False, cancel_futures=True)
         if fresh := interleave(lists, 24):
             self.headlines = fresh
-        if self.ch.quakes:
-            try:
-                self.quakes = quakes_from(get(USGS))
-            except Exception as exc:
-                self.errors.append(f"USGS: {type(exc).__name__}")
-        self.cache.write_text(json.dumps({"headlines": self.headlines, "quakes": self.quakes}, ensure_ascii=False))
+        self.errors = errors
+        write_json(self.cache, {"headlines": self.headlines, "quakes": self.quakes})
 
 
 class Library:
@@ -135,8 +166,14 @@ class Library:
         self.ch, self.dir, self.url = ch, home / "library", manifest_url
         self.dir.mkdir(parents=True, exist_ok=True)
         self.index = self.dir / "index.json"
-        self.items: list[dict] = json.loads(self.index.read_text()) if self.index.exists() else []
+        saved = read_json(self.index, [])
+        self.items: list[dict] = [m for m in saved if isinstance(m, dict) and Path(m.get("path", "")).exists()] \
+            if isinstance(saved, list) else []
         self.synced = 0.0
+
+    def _publish(self, keep: list[dict]) -> None:
+        self.items = sorted(keep, key=lambda m: m.get("published_at", ""), reverse=True)
+        write_json(self.index, self.items)
 
     def sync(self, every_s: float = 1800) -> None:
         if time.time() - self.synced < every_s:
@@ -144,23 +181,29 @@ class Library:
         self.synced = time.time()
         try:
             manifest = json.loads(get(self.url))
+            wanted = [m for m in manifest["shorts"] if m.get("channel") == self.ch.key]
         except Exception:
             return  # keep playing what is already here
-        wanted = [m for m in manifest.get("shorts", []) if m.get("channel") == self.ch.key]
-        keep = []
+        if not wanted and self.items:
+            return  # a whole channel vanishing at once is a librarian fault, not a retraction
+        have = {f.name for f in self.dir.glob("*.mp4")}
+        keep = [m | {"path": str(self.dir / f"{m['video_id']}.mp4")} for m in wanted if f"{m['video_id']}.mp4" in have]
+        names = {Path(m["path"]).name for m in keep}
+        for name in have - names:
+            (self.dir / name).unlink(missing_ok=True)  # retracted or aged out of the library: never aired again
+        self._publish(keep)
         for m in wanted:
             path = self.dir / f"{m['video_id']}.mp4"
-            if not path.exists():
-                try:
-                    tmp = path.with_suffix(".part")
-                    tmp.write_bytes(get(m["url"], timeout=300))
-                    tmp.rename(path)
-                except Exception:
-                    continue
+            if path.name in names:
+                continue
+            tmp = path.with_suffix(".part")
+            try:
+                req = urllib.request.Request(m["url"], headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+                tmp.rename(path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                continue
             keep.append(m | {"path": str(path)})
-        names = {Path(m["path"]).name for m in keep}
-        for f in self.dir.glob("*.mp4"):
-            if f.name not in names:
-                f.unlink()  # retracted or aged out of the library: never aired again
-        self.items = sorted(keep, key=lambda m: m.get("published_at", ""), reverse=True)
-        self.index.write_text(json.dumps(self.items, ensure_ascii=False))
+            self._publish(keep)  # each Short can air as soon as it lands

@@ -1,10 +1,11 @@
 """One channel on air: build the programme ahead of time and push it to YouTube Live over one RTMP connection.
 
     python -m livedesk.air orbitwire --home /var/lib/live-desk --key-file /etc/live-desk/orbitwire.key
-    python -m livedesk.air palpal --home ./work --out test.flv --minutes 3      # a local test, no YouTube
+    python -m livedesk.air palpal --home ./work --out test.flv --minutes 3 --fast    # a local test, no YouTube
 
 The programme: the channel's Shorts newest first (a new Short airs next), and a live update after every
 SHORTS_PER_UPDATE of them. A key is read from its file and never printed: ffmpeg's messages are redacted.
+Anything that stops the programme reaching YouTube ends the process, and systemd starts it again.
 """
 from __future__ import annotations
 
@@ -17,32 +18,36 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
-from datetime import datetime, timedelta, timezone
+from collections import Counter, deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import segments
 from .channels import CHANNELS, Channel
-from .sources import Desk, Library
+from .sources import Desk, Library, write_json
 
 INGEST = "rtmp://a.rtmp.youtube.com/live2/"
-LEAD_S = 150
+LEAD_S = 240
 SHORTS_PER_UPDATE = 3
+FETCH_EVERY_S = 30
+STALL_S = 300  # longer than any segment: nothing aired for this long means the stream is dead
+MAX_FAILS_IN_ROW = 5
+BENCH_AFTER = 2
 # Every chunk restarts the MPEG-TS continuity counters and AAC priming, so each junction draws these warnings while
 # the packets still pass through; they would otherwise flood the journal.
 JUNCTION_NOISE = re.compile(r"Packet corrupt|corrupt input packet|Non-monotonic DTS")
 
 
 class Programme:
-    """Which segment airs next."""
+    """Which segment airs next. Reads the library as it stands; the fetch thread keeps the library fresh."""
 
     def __init__(self, library: Library):
         self.library, self.order, self.since_update, self.known = library, deque(), 0, set()
-        self.bad: set[str] = set()  # Shorts that failed to encode sit out until the process restarts
+        self.items: dict[str, dict] = {}
+        self.fails: Counter = Counter()  # a Short that keeps failing to encode sits out until the process restarts
 
     def refresh(self) -> None:
-        self.library.sync()
-        items = {m["video_id"]: m for m in self.library.items if m["video_id"] not in self.bad}
+        items = {m["video_id"]: m for m in self.library.items if self.fails[m["video_id"]] < BENCH_AFTER}
         fresh = [v for v in items if v not in self.known]
         self.known = set(items)
         self.order = deque([v for v in self.order if v in items])
@@ -64,7 +69,11 @@ class Programme:
         return "short", self.items.get(vid)
 
     def peek(self) -> dict | None:
-        return self.items.get(self.order[0]) if getattr(self, "items", None) and self.order else None
+        return self.items.get(self.order[0]) if self.items and self.order else None
+
+    def failed(self, video_id: str) -> None:
+        self.fails[video_id] += 1
+        self.order = deque(v for v in self.order if v != video_id)
 
 
 def redact(text: str, secret: str | None) -> str:
@@ -80,11 +89,14 @@ class Air:
         self.desk, self.library = Desk(ch, self.home), Library(ch, self.home)
         self.programme = Programme(self.library)
         self.ready: queue.Queue = queue.Queue()
-        self.offset = self.queued_s = 0.0
+        # offset is written only by the builder, aired only by the feeder: lead = offset - aired needs no lock
+        self.offset = self.aired = 0.0
         self.started: float | None = None
-        self.count = 0
+        self.progress = time.time()
+        self.count = self.fails_in_row = 0
+        timeout = ["-rw_timeout", "15000000"] if out.startswith("rtmp") else []
         args = ["ffmpeg", "-hide_banner", "-loglevel", "warning"] + ([] if fast else ["-re"]) + [
-            "-f", "mpegts", "-i", "pipe:0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-f", "flv", out]
+            "-f", "mpegts", "-i", "pipe:0", "-c", "copy", "-bsf:a", "aac_adtstoasc", *timeout, "-f", "flv", out]
         self.pusher = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         threading.Thread(target=self._relay_log, daemon=True).start()
 
@@ -94,15 +106,24 @@ class Air:
             if not JUNCTION_NOISE.search(text):
                 print("pusher:", text, flush=True)
 
-    def air_at(self) -> datetime:
-        base = self.started or time.time()
-        return datetime.fromtimestamp(base + self.offset, timezone.utc)
+    def _fetch(self) -> None:
+        while True:
+            for job in (self.desk.refresh, self.library.sync):
+                try:
+                    job()
+                except Exception as exc:  # sources keep their last good answer
+                    print(f"fetch {job.__qualname__} failed: {type(exc).__name__}: {exc}"[:300], flush=True)
+            time.sleep(FETCH_EVERY_S)
 
-    def build_one(self) -> None:
+    def air_at(self) -> datetime:
+        """When the segment being built now goes on air (the pusher reads at real time from `started`)."""
+        return datetime.fromtimestamp((self.started or time.time()) + self.offset, timezone.utc)
+
+    def build_one(self) -> bool:
         kind, short = self.programme.next()
-        self.desk.refresh()
         self.count += 1
         work = self.work / f"{self.count:06d}-{kind}"
+        out = work.with_suffix(".ts")
         try:
             if kind == "short" and short:
                 path, length = segments.short_segment(self.ch, short, self.desk, work, self.offset, self.air_at(),
@@ -112,54 +133,68 @@ class Air:
                                                        self.programme.peek())
         except Exception as exc:  # a bad file or a failed encode costs one segment, never the stream
             print(f"segment {work.name} failed: {type(exc).__name__}: {exc}"[:300], flush=True)
-            shutil.rmtree(work, ignore_errors=True)
+            out.unlink(missing_ok=True)
             if short:
-                self.programme.bad.add(short["video_id"])
-                self.programme.order = deque(v for v in self.programme.order if v != short["video_id"])
-            return
-        shutil.rmtree(work, ignore_errors=True)
+                self.programme.failed(short["video_id"])
+            return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
         self.offset += length
-        self.queued_s += length
-        self.ready.put((path, length, kind, (short or {}).get("title", "")))
+        self.ready.put((path, self.offset, kind, (short or {}).get("title", "")))
+        return True
 
     def feed(self) -> None:
         while True:
-            path, length, kind, title = self.ready.get()
+            path, end, kind, title = self.ready.get()
             if self.started is None:
-                self.started = time.time() - (self.offset - self.queued_s)
-            print(f"on air {datetime.now(timezone.utc):%H:%M:%S} {kind} {length:.1f}s {title[:60]}", flush=True)
+                self.started = time.time()
+            print(f"on air {datetime.now(timezone.utc):%H:%M:%S} {kind} {title[:60]}", flush=True)
             with open(path, "rb") as f:
                 shutil.copyfileobj(f, self.pusher.stdin, 1 << 16)
             self.pusher.stdin.flush()
             path.unlink(missing_ok=True)
-            self.queued_s -= length
-            self.status(kind, title)
+            self.aired, self.progress = end, time.time()
+            try:
+                self.status(kind, title)
+            except OSError:
+                pass
 
     def status(self, kind: str, title: str) -> None:
-        (self.home / "status.json").write_text(json.dumps({
+        write_json(self.home / "status.json", {
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "segment": kind, "title": title,
-            "library": len(self.library.items), "headlines": len(self.desk.headlines),
-            "quakes": len(self.desk.quakes), "errors": self.desk.errors}, ensure_ascii=False))
+            "lead_s": round(self.offset - self.aired), "library": len(self.library.items),
+            "headlines": len(self.desk.headlines), "quakes": len(self.desk.quakes), "errors": self.desk.errors})
 
     def run(self, minutes: float | None) -> int:
-        self.desk.refresh(force=True)
+        threading.Thread(target=self._fetch, daemon=True).start()
+        time.sleep(0 if self.desk.headlines else 15)  # a cold start gets a moment to fetch its first headlines
         self.build_one()
-        threading.Thread(target=self.feed, daemon=True).start()
+        feeder = threading.Thread(target=self.feed, daemon=True)
+        feeder.start()
         until = time.time() + minutes * 60 if minutes else None
         while self.pusher.poll() is None:
             if until and time.time() > until:
-                break
-            # queued_s is programme not yet handed to the pusher, which reads it in real time: the lead on air.
-            if self.ready.qsize() < 2 or self.queued_s < LEAD_S:
-                self.build_one()
+                while not self.ready.empty() and feeder.is_alive():
+                    time.sleep(1)
+                time.sleep(2)
+                self.pusher.stdin.close()
+                return self.pusher.wait()
+            if not feeder.is_alive() or time.time() - self.progress > STALL_S:
+                print("nothing reached the pusher for too long; restarting", flush=True)
+                self.pusher.kill()
+                return 1
+            if self.ready.qsize() < 2 or self.offset - self.aired < LEAD_S:
+                if self.build_one():
+                    self.fails_in_row = 0
+                else:
+                    self.fails_in_row += 1
+                    if self.fails_in_row >= MAX_FAILS_IN_ROW:
+                        print("segments keep failing; restarting", flush=True)
+                        self.pusher.kill()
+                        return 1
+                    time.sleep(5)
             else:
                 time.sleep(2)
-        if until:
-            while not self.ready.empty():
-                time.sleep(1)
-            time.sleep(2)
-            self.pusher.stdin.close()
-            return self.pusher.wait()
         print(f"pusher exited with {self.pusher.returncode}", flush=True)
         return 1
 
@@ -177,13 +212,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.out:
         out = a.out
     else:
-        if not a.key_file or not Path(a.key_file).exists():
-            print(f"no stream key file for {a.channel}; waiting for the owner to add it", flush=True)
-            time.sleep(600)
-            return 1
-        secret = Path(a.key_file).read_text().strip()
+        secret = Path(a.key_file).read_text().strip() if a.key_file and Path(a.key_file).exists() else ""
         if not secret or secret.startswith("PASTE"):
-            print(f"{a.key_file} has no stream key yet; waiting for the owner to add it", flush=True)
+            print(f"no stream key for {a.channel} yet; waiting for the owner to add it", flush=True)
             time.sleep(600)
             return 1
         out = INGEST + secret

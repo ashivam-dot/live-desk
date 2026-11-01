@@ -31,5 +31,8 @@ done
 install -m 644 "$APP"/server/live-desk@.service "$APP"/server/live-desk-update.service \
   "$APP"/server/live-desk-update.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now live-desk@orbitwire live-desk@palpal live-desk-update.timer
-echo "live desk installed; status: systemctl status 'live-desk@*'"
+systemctl enable live-desk@orbitwire live-desk@palpal live-desk-update.timer
+systemctl restart live-desk@orbitwire live-desk@palpal live-desk-update.timer
+# `systemctl status` would print the pusher's command line, which holds the stream key; these do not.
+echo "live desk installed; check with: systemctl is-active live-desk@orbitwire live-desk@palpal"
+echo "logs: journalctl -u live-desk@orbitwire -n 50"

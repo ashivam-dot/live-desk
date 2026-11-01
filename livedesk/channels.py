@@ -28,6 +28,8 @@ class Channel:
     text: tuple[int, int, int]
     head_font: Path
     body_font: Path
+    ticker_band: tuple[int, int, int]
+    ticker_ink: tuple[int, int, int]
     words: dict = field(default_factory=dict)
 
 
@@ -46,7 +48,8 @@ ORBITWIRE = Channel(
     quakes=True,
     bg=(8, 18, 34), panel=(10, 24, 46, 222), accent=(79, 195, 247), hot=(255, 90, 78), text=(240, 246, 252),
     head_font=FONTS / "Anton-Regular.ttf", body_font=FONTS / "Montserrat.ttf",
-    words={"live": "LIVE", "now": "NOW PLAYING", "headlines": "WORLD HEADLINES", "quakes": "EARTHQUAKES · LAST 24 H",
+    ticker_band=(240, 246, 252), ticker_ink=(8, 18, 34),
+    words={"live": "LIVE", "ticker": "LATEST", "now": "NOW PLAYING", "headlines": "WORLD HEADLINES", "quakes": "EARTHQUAKES · LAST 24 H",
            "update": "LIVE UPDATE", "follow": "Follow Orbitwire for the world's biggest stories",
            "full": "Full story on the channel", "published": "Published", "clocks": "WORLD TIME",
            "source": "Headlines: {outlets}. Quakes: USGS.", "next": "Coming up", "subscribe": "SUBSCRIBE"},
@@ -65,7 +68,8 @@ PALPAL = Channel(
     quakes=False,
     bg=(120, 8, 10), panel=(24, 6, 8, 225), accent=(255, 196, 0), hot=(225, 20, 20), text=(255, 255, 255),
     head_font=FONTS / "Mukta-ExtraBold.ttf", body_font=FONTS / "Mukta-SemiBold.ttf",
-    words={"live": "लाइव", "now": "अभी देखिए", "headlines": "ताज़ा खबरें", "update": "पल पल अपडेट",
+    ticker_band=(255, 196, 0), ticker_ink=(40, 4, 6),
+    words={"live": "लाइव", "ticker": "ब्रेकिंग", "now": "अभी देखिए", "headlines": "ताज़ा खबरें", "update": "पल पल अपडेट",
            "follow": "हर बड़ी खबर सबसे पहले, पल पल न्यूज़ पर", "full": "पूरी खबर चैनल पर",
            "published": "प्रकाशित", "clocks": "भारत समय", "source": "स्रोत: {outlets}", "next": "आगे",
            "subscribe": "सब्सक्राइब करें", "zone": ""},

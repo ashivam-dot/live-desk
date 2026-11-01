@@ -15,7 +15,9 @@ from PIL import Image, ImageDraw, ImageFont
 from .channels import Channel
 
 W, H = 1280, 720
-SHORT_W = 404  # a 9:16 Short at the frame's full height, kept even for 4:2:0 video
+TICKER_H = 48  # the headline crawl along the bottom, as on Indian TV news
+BOTTOM = H - TICKER_H
+SHORT_H, SHORT_W = BOTTOM, 378  # a 9:16 Short above the ticker, kept even for 4:2:0 video
 SHORT_X = (W - SHORT_W) // 2
 SIDE_W = SHORT_X - 56
 LEFT_X, RIGHT_X = 28, SHORT_X + SHORT_W + 28
@@ -167,13 +169,48 @@ def quake_list(d, ch: Channel, x: int, y: int, width: int, rows: list[dict], at:
     return y
 
 
+def ticker_band(d: ImageDraw.ImageDraw, ch: Channel) -> None:
+    d.rectangle((0, BOTTOM, W, H), fill=ch.ticker_band)
+    d.rectangle((0, BOTTOM, W, BOTTOM + 3), fill=ch.hot)
+
+
+def ticker_label(ch: Channel) -> tuple[Image.Image, int]:
+    """The fixed box at the ticker's left end, drawn over the crawl; returns it and its width."""
+    f = font(ch.head_font, 24)
+    text = ch.words["ticker"]
+    w = int(f.getlength(text)) + 36
+    img = Image.new("RGBA", (W, TICKER_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.polygon(((0, 3), (w, 3), (w + 16, TICKER_H // 2 + 1), (w, TICKER_H), (0, TICKER_H)), fill=ch.hot)
+    d.text((18, (TICKER_H - f.size) // 2 - 2), text, font=f, fill=(255, 255, 255))
+    return img, w + 16
+
+
+def ticker_strip(ch: Channel, desk, limit: int = 16) -> Image.Image:
+    """Every headline in one long line, a small accent square between them, for the crawl to scroll."""
+    f = font(ch.body_font, 24)
+    rows = [r["title"] for r in desk.headlines[:limit]] or [ch.words["follow"]]
+    gap = 56
+    width = int(sum(f.getlength(t) for t in rows) + gap * len(rows)) + 2
+    img = Image.new("RGBA", (width, TICKER_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    x, y = 0, (TICKER_H - f.size) // 2 - 1
+    for t in rows:
+        d.text((x, y), t, font=f, fill=ch.ticker_ink)
+        x += int(f.getlength(t)) + gap // 2 - 5
+        d.rectangle((x, TICKER_H // 2 - 3, x + 9, TICKER_H // 2 + 6), fill=ch.hot)
+        x += gap // 2 + 5
+    return img
+
+
 def short_frame(ch: Channel, short: dict, page: str, desk, at: datetime, coming: dict | None = None) -> Image.Image:
     """The overlay around a playing Short: transparent where the Short and its blurred backdrop show."""
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     brand_bar(img, ch)
+    ticker_band(d, ch)
     x, width = LEFT_X + 10, SIDE_W - 20
-    panel(d, ch, (LEFT_X - 8, TOP + 40, LEFT_X + SIDE_W + 8, H - 40))
+    panel(d, ch, (LEFT_X - 8, TOP + 40, LEFT_X + SIDE_W + 8, BOTTOM - 16))
     y = label(d, ch, (x, TOP + 58), ch.words["now"])
     y = text_block(d, (x, y + 4), short["title"], font(ch.head_font, 38), ch.text, width, 4, 1.14)
     when = datetime.fromisoformat(short["published_at"]).astimezone(ZoneInfo(ch.clocks[0][1]))
@@ -186,12 +223,12 @@ def short_frame(ch: Channel, short: dict, page: str, desk, at: datetime, coming:
         d.line((x, y, x + width, y), fill=ch.text + (60,), width=1)
         y = label(d, ch, (x, y + 16), ch.words["next"].upper() if ch.lang == "en" else ch.words["next"], 20)
         text_block(d, (x, y), coming["title"], font(ch.body_font, 22), ch.text + (230,), width, 3)
-    d.text((x, H - 168), ch.words["full"], font=meta, fill=ch.accent)
-    subscribe(d, ch, x, H - 138)
+    d.text((x, BOTTOM - 144), ch.words["full"], font=meta, fill=ch.accent)
+    subscribe(d, ch, x, BOTTOM - 114)
 
-    box = (RIGHT_X - 8, 24, RIGHT_X + SIDE_W + 8, H - 40)
+    box = (RIGHT_X - 8, 24, RIGHT_X + SIDE_W + 8, BOTTOM - 16)
     panel(d, ch, box)
-    x, y, width, bottom = RIGHT_X + 10, 40, SIDE_W - 20, H - 56
+    x, y, width, bottom = RIGHT_X + 10, 40, SIDE_W - 20, BOTTOM - 32
     y = clocks(d, ch, x, y, width, at)
     if page == "quakes" and desk.quakes:
         quake_list(d, ch, x, y, width, desk.quakes, at, bottom)
@@ -209,13 +246,14 @@ def update_page(ch: Channel, page: str, desk, at: datetime, coming: dict | None)
         shade = int(28 * (1 - abs(i - H * 0.35) / H))
         d.line((0, i, W, i), fill=tuple(min(255, c + shade) for c in ch.bg))
     brand_bar(img, ch)
+    ticker_band(d, ch)
     big = font(ch.head_font, 30)
     title = ch.words["update"]
     d.text((W - 48 - big.getlength(title), 34), title, font=big, fill=ch.accent)
     stamp = at.astimezone(ZoneInfo(ch.clocks[0][1]))
     d.text((W - 48 - font(ch.body_font, 18).getlength(f"{stamp:%H:%M} · {stamp:%d.%m.%Y}"), 76),
            f"{stamp:%H:%M} · {stamp:%d.%m.%Y}", font=font(ch.body_font, 18), fill=ch.text + (200,))
-    x, y, width, bottom = 64, 150, W - 128, H - 70
+    x, y, width, bottom = 64, 150, W - 128, BOTTOM - 50
     if page.startswith("headlines"):
         n = int(page.rsplit("-", 1)[-1]) if "-" in page else 1
         rows = desk.headlines[(n - 1) * 3:n * 3] or desk.headlines[:3]
@@ -235,7 +273,7 @@ def update_page(ch: Channel, page: str, desk, at: datetime, coming: dict | None)
             for i, l in enumerate(wrap(text, nf, W - 240, 2)):
                 d.text(((W - nf.getlength(l)) / 2, 540 + i * 32), l, font=nf, fill=ch.text + (220,))
     outlets = ", ".join(dict.fromkeys(r["outlet"] for r in desk.headlines[:9])) or "—"
-    d.text((x, H - 44), ch.words["source"].format(outlets=outlets), font=font(ch.body_font, 15),
+    d.text((x, BOTTOM - 34), ch.words["source"].format(outlets=outlets), font=font(ch.body_font, 15),
            fill=ch.text + (150,))
     return img
 
