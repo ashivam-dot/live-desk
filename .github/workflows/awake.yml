@@ -1,0 +1,25 @@
+name: awake
+
+# A free Hugging Face Space sleeps after 48 hours without visits; this visits each stream's status page.
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: vars.SPACE_URLS != ''
+    steps:
+      - name: Visit
+        env:
+          URLS: ${{ vars.SPACE_URLS }}
+        run: |
+          for url in $URLS; do
+            echo "$url"
+            curl -fsS --max-time 60 "$url" | head -c 400 || echo "no answer"
+            echo
+          done

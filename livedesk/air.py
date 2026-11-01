@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import shutil
@@ -26,7 +27,8 @@ from . import segments
 from .channels import CHANNELS, Channel
 from .sources import Desk, Library, write_json
 
-INGEST = "rtmp://a.rtmp.youtube.com/live2/"
+INGEST = {"rtmp": "rtmp://a.rtmp.youtube.com/live2/",
+          "rtmps": "rtmps://a.rtmps.youtube.com:443/live2/"}  # for hosts that only allow outgoing 443
 LEAD_S = 240
 SHORTS_PER_UPDATE = 3
 FETCH_EVERY_S = 30
@@ -204,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("channel", choices=sorted(CHANNELS))
     p.add_argument("--home", default="/var/lib/live-desk")
     p.add_argument("--key-file", help="file holding the YouTube stream key (one line)")
+    p.add_argument("--key-env", help="environment variable holding the stream key (a host's secret setting)")
+    p.add_argument("--ingest", choices=sorted(INGEST), default="rtmp")
     p.add_argument("--out", help="write the stream to this file instead of YouTube (testing)")
     p.add_argument("--minutes", type=float, help="stop after this long (testing)")
     p.add_argument("--fast", action="store_true", help="do not pace to real time (testing with --out)")
@@ -212,12 +216,15 @@ def main(argv: list[str] | None = None) -> int:
     if a.out:
         out = a.out
     else:
-        secret = Path(a.key_file).read_text().strip() if a.key_file and Path(a.key_file).exists() else ""
+        if a.key_env:
+            secret = os.environ.get(a.key_env, "").strip()
+        else:
+            secret = Path(a.key_file).read_text().strip() if a.key_file and Path(a.key_file).exists() else ""
         if not secret or secret.startswith("PASTE"):
             print(f"no stream key for {a.channel} yet; waiting for the owner to add it", flush=True)
             time.sleep(600)
             return 1
-        out = INGEST + secret
+        out = INGEST[a.ingest] + secret
     return Air(CHANNELS[a.channel], Path(a.home), out, secret, a.fast).run(a.minutes)
 
 
