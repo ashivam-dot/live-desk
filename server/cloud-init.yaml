@@ -1,0 +1,15 @@
+#cloud-config
+# Paste this whole file into Oracle Cloud's "Create instance" > Show advanced options > Management >
+# "Paste cloud-init script". Replace the two PASTE_... lines with the stream keys from YouTube Studio
+# (Go live > Stream > Stream key) first. Nothing else needs changing.
+write_files:
+  - path: /etc/live-desk/orbitwire.key
+    permissions: "0600"
+    content: |
+      PASTE_ORBITWIRE_STREAM_KEY_HERE
+  - path: /etc/live-desk/palpal.key
+    permissions: "0600"
+    content: |
+      PASTE_PALPAL_STREAM_KEY_HERE
+runcmd:
+  - [bash, -c, "curl -fsSL https://raw.githubusercontent.com/ashivam-dot/live-desk/main/server/install.sh | bash"]

@@ -1,0 +1,27 @@
+name: library
+
+# Copies Orbitwire's and Pal Pal News's newly published Shorts into the `library` release for the live servers.
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: library
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 librarian/collect.py

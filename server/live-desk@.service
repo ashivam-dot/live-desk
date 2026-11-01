@@ -1,0 +1,22 @@
+[Unit]
+Description=Live desk stream for %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=live-desk
+Group=live-desk
+WorkingDirectory=/opt/live-desk
+ExecStart=/opt/live-desk/.venv/bin/python -m livedesk.air %i --home /var/lib/live-desk --key-file /etc/live-desk/%i.key
+StateDirectory=live-desk
+Restart=always
+RestartSec=10
+Nice=-5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/live-desk
+
+[Install]
+WantedBy=multi-user.target
