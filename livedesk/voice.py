@@ -21,7 +21,7 @@ from .channels import Channel
 VOICES = {"orbitwire": ("en-US-AndrewNeural", "+4%"), "palpal": ("hi-IN-SwaraNeural", "+6%")}
 TIMEOUT_S = 25
 GAP_S = 0.45  # the breath between one headline and the next
-READ_PER_PAGE = 2  # of the three a page shows; the whole bulletin stays near half a minute
+READ_PER_PAGE = 2  # of the three a page shows; the whole bulletin stays under about a minute
 
 WORDS = {
     "en": {
