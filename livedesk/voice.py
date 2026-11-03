@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import subprocess
+import unicodedata
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,45 @@ WORDS = {
                    "पल पल न्यूज़ को सब्सक्राइब करना न भूलें।"],
     },
 }
+
+
+# Owner, 2026-11-04: a bookish Hindi word that Indians normally say in English is read in English, the way Aaj Tak
+# or ABP anchors speak; written in Devanagari so the Hindi voice says it naturally. Only the spoken words change,
+# never the headline on screen. Longer phrases are replaced before the words inside them.
+EVERYDAY_HI = {
+    "भारतीय अंतरिक्ष अनुसंधान संगठन": "इसरो", "प्रवर्तन निदेशालय": "ईडी", "केंद्रीय अन्वेषण ब्यूरो": "सीबीआई",
+    "राष्ट्रीय अन्वेषण अभिकरण": "एनआईए", "भारतीय रिज़र्व बैंक": "आरबीआई", "भारतीय प्रौद्योगिकी संस्थान": "आईआईटी",
+    "अखिल भारतीय आयुर्विज्ञान संस्थान": "एम्स", "अंतरराष्ट्रीय मुद्रा कोष": "आईएमएफ", "वस्तु एवं सेवा कर": "जीएसटी",
+    "सकल घरेलू उत्पाद": "जीडीपी", "वायु गुणवत्ता सूचकांक": "एक्यूआई", "जनहित याचिका": "पीआईएल",
+    "प्राथमिकी": "एफआईआर", "उच्चतम न्यायालय": "सुप्रीम कोर्ट", "सर्वोच्च न्यायालय": "सुप्रीम कोर्ट",
+    "उच्च न्यायालय": "हाई कोर्ट", "न्यायालय": "कोर्ट", "न्यायाधीश": "जज", "अधिवक्ता": "वकील",
+    "कारावास": "जेल", "कारागार": "जेल", "निर्वाचन आयोग": "चुनाव आयोग", "मध्यावधि चुनाव": "मिडटर्म चुनाव",
+    "मतगणना": "काउंटिंग", "मतपत्र": "बैलेट पेपर", "मंत्रिमंडल": "कैबिनेट", "विधेयक": "बिल",
+    "अधिसूचना": "नोटिफिकेशन", "महाभियोग": "इंपीचमेंट", "संवाददाता सम्मेलन": "प्रेस कॉन्फ्रेंस",
+    "पत्रकार वार्ता": "प्रेस कॉन्फ्रेंस", "साक्षात्कार": "इंटरव्यू", "शिखर सम्मेलन": "समिट",
+    "युद्धविराम": "सीज़फायर", "संघर्ष विराम": "सीज़फायर", "प्रक्षेपास्त्र": "मिसाइल", "परमाणु": "न्यूक्लियर",
+    "सुरक्षा परिषद": "सिक्योरिटी काउंसिल", "अनुसंधान केंद्र": "रिसर्च सेंटर", "अनुसंधान": "रिसर्च",
+    "उपग्रह": "सैटेलाइट", "प्रक्षेपण": "लॉन्च", "अंतरिक्ष यात्री": "एस्ट्रोनॉट", "अंतरिक्ष यान": "स्पेसक्राफ्ट",
+    "प्रौद्योगिकी": "टेक्नोलॉजी", "दूरसंचार": "टेलीकॉम", "संगणक": "कंप्यूटर", "अंतर्जाल": "इंटरनेट",
+    "दूरभाष": "फ़ोन", "चलभाष": "मोबाइल", "विश्वविद्यालय": "यूनिवर्सिटी", "महाविद्यालय": "कॉलेज",
+    "विद्यालय": "स्कूल", "प्रवेश परीक्षा": "एंट्रेंस एग्ज़ाम", "परीक्षा परिणाम": "रिजल्ट", "चिकित्सक": "डॉक्टर",
+    "चिकित्सालय": "अस्पताल", "हवाई अड्डा": "एयरपोर्ट", "हवाई अड्डे": "एयरपोर्ट", "उड़ान": "फ्लाइट",
+    "उड़ानें": "फ्लाइट्स", "रेलगाड़ी": "ट्रेन", "यातायात": "ट्रैफिक", "नागरिक उड्डयन": "सिविल एविएशन",
+    "उड्डयन": "एविएशन", "चक्रवात": "साइक्लोन", "चक्रवाती तूफान": "साइक्लोन", "मौसम विज्ञान विभाग": "मौसम विभाग",
+    "सूचकांक": "इंडेक्स", "मुद्रास्फीति": "महंगाई", "आयकर": "इनकम टैक्स", "अनुबंध": "कॉन्ट्रैक्ट",
+    "निविदा": "टेंडर", "प्रतिबंध": "बैन", "सांकेतिक": "सिंबॉलिक", "अभियंता": "इंजीनियर", "विद्युत": "बिजली",
+    "विश्व कप": "वर्ल्ड कप", "प्रशिक्षक": "कोच",
+}
+_EVERYDAY = sorted(((unicodedata.normalize("NFC", k), v) for k, v in EVERYDAY_HI.items()), key=lambda kv: -len(kv[0]))
+# whole words only: an inflected form ("परमाणुओं") is left alone rather than read half in English
+_EVERYDAY_RE = re.compile("(?<![\u0900-\u097F])(" + "|".join(re.escape(k) for k, _ in _EVERYDAY) +
+                          ")(?![\u0900-\u097F])")
+
+
+def everyday_hi(text: str) -> str:
+    """Hindi as an anchor says it: bookish words swapped for the English everyone uses (see EVERYDAY_HI)."""
+    lookup = dict(_EVERYDAY)
+    return _EVERYDAY_RE.sub(lambda m: lookup[m.group(1)], unicodedata.normalize("NFC", text))
 
 
 def _pick(options: list[str], seed: str) -> str:
@@ -141,7 +181,7 @@ def script(ch: Channel, pages: list[str], desk, at: datetime, coming: dict | Non
             if coming and coming.get("title"):
                 line = _pick(w["next"], seed + "n").format(title=clean(coming["title"])) + " " + line
             parts.append(line)
-    return parts
+    return [everyday_hi(p) for p in parts] if ch.lang == "hi" else parts
 
 
 async def _say(text: str, voice: str, rate: str, path: Path) -> None:

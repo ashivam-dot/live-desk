@@ -198,6 +198,18 @@ def test_google_feeds_parse():
     assert trending.traffic("2M+") == 2_000_000 and trending.traffic("") == 0
 
 
+def test_bookish_hindi_is_spoken_in_everyday_english():
+    assert voice.everyday_hi("भारतीय अंतरिक्ष अनुसंधान संगठन का नया उपग्रह, उच्चतम न्यायालय ने रोकी उड़ान") == \
+        "इसरो का नया सैटेलाइट, सुप्रीम कोर्ट ने रोकी फ्लाइट"
+    assert voice.everyday_hi("परमाणुओं पर अनुसंधानकर्ता") == "परमाणुओं पर अनुसंधानकर्ता"
+    assert voice.everyday_hi("ज्ञानेश कुमार पर सांकेतिक महाभियोग") == "ज्ञानेश कुमार पर सिंबॉलिक इंपीचमेंट"
+    desk = type("D", (), {"headlines": [{"title": "मंत्रिमंडल ने विधेयक को दी मंजूरी", "outlet": "आज तक"}] * 6,
+                          "quakes": []})()
+    ch = CHANNELS["palpal"]
+    spoken = voice.script(ch, segments.update_pages(ch, desk), desk, AT, None)[0]
+    assert "कैबिनेट ने बिल को दी मंजूरी" in spoken and "मंत्रिमंडल" not in spoken
+
+
 def test_headlines_read_like_a_newsreader():
     assert voice.clean("LIVE: Japan’s bank holds rates... | markets") == "Japan's bank holds rates"
     assert voice.clean("“पीतल नगरी”... जहां ताकत है बराबर!") == "पीतल नगरी, जहां ताकत है बराबर!"
