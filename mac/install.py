@@ -30,7 +30,8 @@ if not remove:
         run("git", "clone", "-q", "https://github.com/ashivam-dot/live-desk", str(REPO))
     if not (REPO / ".venv").exists():
         run("uv", "venv", "-q", "--python", "3.12", str(REPO / ".venv"))
-    run("uv", "pip", "install", "-q", "--python", str(REPO / ".venv/bin/python"), "-r", str(REPO / "requirements.txt"))
+    # the venv itself, not its python: that is a symlink uv would follow out to Homebrew's interpreter
+    run("uv", "pip", "install", "-q", "--python", str(REPO / ".venv"), "-r", str(REPO / "requirements.txt"))
     (APP / "logs").mkdir(exist_ok=True)
 
 for channel in ("orbitwire", "palpal"):

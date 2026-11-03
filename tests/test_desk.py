@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from livedesk import air, look, segments, sources  # noqa: E402
+from livedesk import air, look, segments, sources, voice  # noqa: E402
 from livedesk.channels import CHANNELS  # noqa: E402
 
 AT = datetime(2026, 11, 1, 15, 0, tzinfo=timezone.utc)
@@ -144,3 +144,26 @@ def test_frames_render(key):
     strip, (label, label_w) = look.ticker_strip(ch, desk), look.ticker_label(ch)
     assert strip.height == label.height == look.TICKER_H and strip.width > look.W and 60 < label_w < 300
     assert look.SHORT_W * 16 == look.SHORT_H * 9 and look.SHORT_W % 2 == 0
+
+
+def test_headlines_read_like_a_newsreader():
+    assert voice.clean("LIVE: Japan’s bank holds rates... | markets") == "Japan's bank holds rates"
+    assert voice.clean("“पीतल नगरी”... जहां ताकत है बराबर!") == "पीतल नगरी, जहां ताकत है बराबर!"
+    assert voice.spoken_place("45 km NE of Hualien City, Taiwan") == "45 kilometres north-east of Hualien City, Taiwan"
+    assert voice.spoken_place("Fiji region") == "near Fiji region"
+    assert [voice._part_of_day(h) for h in (0, 4, 5, 13, 19, 23)] == \
+        ["night", "night", "morning", "afternoon", "evening", "night"]
+
+
+@pytest.mark.parametrize("key", sorted(CHANNELS))
+def test_update_script_has_one_part_per_page(key):
+    ch = CHANNELS[key]
+    desk = type("D", (), {"headlines": [{"title": f"Story number {i} is long enough!", "outlet": "BBC"}
+                                        for i in range(6)],
+                          "quakes": [{"mag": 6.1, "place": "10 km S of Lima, Peru"}]})()
+    pages = segments.update_pages(ch, desk)
+    parts = voice.script(ch, pages, desk, AT, {"title": "Next one"})
+    assert len(parts) == len(pages) and all(parts[:2]) and "Next one" in parts[-1]
+    assert "Story number 0" in parts[0] and "Story number 2" not in parts[0] and "Story number 3" in parts[1]
+    assert not any(m in " ".join(parts) for m in ("!।", "!.", "?।", ".."))
+    assert voice.script(ch, pages, desk, AT, None) == voice.script(ch, pages, desk, AT, None)

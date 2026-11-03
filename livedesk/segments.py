@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import look, music
+from . import look, music, voice
 from .channels import Channel
 
 FPS = 30
@@ -24,6 +25,12 @@ AUDIO = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"]
 TICKER_SPEED = 110  # pixels a second
 PAGE_S = 10
 UPDATE_PAGE_S = 6
+TARGET_LUFS = -16  # every segment airs at one loudness, so nothing jumps between a Short and an update
+TAIL_S = 0.35  # the pause a Short keeps after its last sound; its own outro silence would be dead air
+EDGE_FADE_S = 0.02  # chunk edges start and end at zero, so a junction never clicks
+BED_UNDER_VOICE_DB = -12
+
+_measured: dict[tuple[str, float], tuple[float, float | None]] = {}
 
 
 def whole(seconds: float) -> float:
@@ -34,6 +41,23 @@ def duration(path: Path) -> float:
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
                          capture_output=True, text=True, check=True).stdout
     return float(json.loads(out)["format"]["duration"])
+
+
+def measure(path: Path) -> tuple[float, float | None]:
+    """(gain in dB that brings the file to TARGET_LUFS, when its closing silence starts or None)."""
+    key = (str(path), path.stat().st_mtime)
+    if key not in _measured:
+        log = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-v", "info", "-i", str(path), "-vn",
+                              "-af", "silencedetect=n=-50dB:d=0.3,ebur128", "-f", "null", "-"],
+                             capture_output=True, text=True, timeout=120).stderr
+        loud = re.findall(r"\bI:\s+(-?[\d.]+) LUFS", log)
+        gain = min(15.0, max(-20.0, TARGET_LUFS - float(loud[-1]))) if loud and float(loud[-1]) > -70 else 0.0
+        starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", log)]
+        ends = [float(x) for x in re.findall(r"silence_end: (-?[\d.]+)", log)]
+        tail = starts[-1] if starts and ends and len(starts) == len(ends) and ends[-1] >= duration(path) - 0.25 \
+            else None
+        _measured[key] = (gain, tail)
+    return _measured[key]
 
 
 def _pages_list(work: Path, frames: list[tuple[Path, float]]) -> Path:
@@ -78,7 +102,9 @@ def short_segment(ch: Channel, short: dict, desk, work: Path, offset: float, air
     """A Short in the middle of the frame, its title on the left, live pages rotating on the right."""
     work.mkdir(parents=True, exist_ok=True)
     src = Path(short["path"])
-    length = whole(duration(src))
+    gain, tail = measure(src)
+    full = duration(src)
+    length = whole(min(full, tail + TAIL_S) if tail and tail > full / 2 else full)
     frames = []
     for i, page in enumerate(short_pages(ch, length)):
         p = work / f"p{i}.png"
@@ -92,7 +118,8 @@ def short_segment(ch: Channel, short: dict, desk, work: Path, offset: float, air
              f"[bg][fg]overlay={look.SHORT_X}:0[base];"
              f"[1:v]format=rgba,fps={FPS}[ov];"
              f"[base][ov]overlay=0:0:eof_action=repeat,fps={FPS}[paged];"
-             f"[0:a]aresample=48000,apad[aud];")
+             f"[0:a]aresample=48000,volume={gain:.2f}dB,alimiter=limit=0.9:level=false,apad,"
+             f"afade=t=in:d={EDGE_FADE_S},afade=t=out:st={length - 0.25:.3f}:d=0.25[aud];")
     ticker_in, ticker_graph = _ticker(ch, desk, work, offset, "paged", 2)
     out = work.with_suffix(".ts")
     _encode(["-i", str(src), "-f", "concat", "-safe", "0", "-i", str(_pages_list(work, frames)), *ticker_in,
@@ -109,21 +136,50 @@ def update_pages(ch: Channel, desk) -> list[str]:
 
 def update_segment(ch: Channel, desk, work: Path, offset: float, air_at: datetime,
                    coming: dict | None) -> tuple[Path, float]:
-    """A full-frame live update between Shorts: a new page every UPDATE_PAGE_S seconds over the channel's bed."""
+    """A full-frame live update between Shorts: the newsreader reads each page while it is up, over the channel's bed
+    (ducked under the voice). Without the voice, a new page every UPDATE_PAGE_S seconds over the bed alone."""
     work.mkdir(parents=True, exist_ok=True)
     pages = update_pages(ch, desk)
-    length = whole(len(pages) * UPDATE_PAGE_S)
-    frames = []
+    spoken: list[tuple[Path, float] | None] = [None] * len(pages)
+    try:
+        for i, text in enumerate(voice.script(ch, pages, desk, air_at, coming)):
+            if text:
+                clip = work / f"v{i}.mp3"
+                spoken[i] = (clip, voice.speak(ch, text, clip))
+    except Exception as exc:  # the update still airs, with music only
+        print(f"update voice skipped: {exc}"[:200], flush=True)
+        spoken = [None] * len(pages)
+    holds = [max(UPDATE_PAGE_S, s[1] + 2 * voice.GAP_S) if s else UPDATE_PAGE_S for s in spoken]
+    length = whole(sum(holds))
+    holds[-1] += length - sum(holds)
+    frames, start = [], 0.0
     for i, page in enumerate(pages):
         p = work / f"u{i}.png"
-        look.update_page(ch, page, desk, air_at + timedelta(seconds=i * UPDATE_PAGE_S), coming).convert("RGB").save(p)
-        frames.append((p, UPDATE_PAGE_S))
+        look.update_page(ch, page, desk, air_at + timedelta(seconds=start), coming).convert("RGB").save(p)
+        frames.append((p, holds[i]))
+        start += holds[i]
     bed = music.bed(ch, work.parent.parent / "assets")
-    graph = (f"[0:v]fps={FPS},format=rgba[paged];"
-             f"[1:a]aresample=48000,afade=t=in:d=1.5,afade=t=out:st={length - 1.5:.3f}:d=1.5[aud];")
+    bed_gain, _ = measure(bed)
+    clips = [(i, s) for i, s in enumerate(spoken) if s]
+    graph = f"[0:v]fps={FPS},format=rgba[paged];"
+    fade = f"afade=t=in:d={EDGE_FADE_S},afade=t=out:st={length - 0.6:.3f}:d=0.6"
+    if clips:
+        graph += (f"[1:a]aresample=48000,volume={bed_gain + BED_UNDER_VOICE_DB:.2f}dB,"
+                  f"afade=t=in:d=0.8[bed];")
+        for n, (i, (clip, _)) in enumerate(clips):
+            at_ms = round((sum(holds[:i]) + voice.GAP_S) * 1000)
+            graph += (f"[{4 + n}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                      f"volume={measure(clip)[0]:.2f}dB,adelay=delays={at_ms}:all=1[c{n}];")
+        graph += ("".join(f"[c{n}]" for n in range(len(clips))) +
+                  f"amix=inputs={len(clips)}:normalize=0:dropout_transition=0,apad,asplit[vk][vm];"
+                  f"[bed][vk]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=450[duck];"
+                  f"[duck][vm]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.9:level=false,{fade}[aud];")
+    else:
+        graph += f"[1:a]aresample=48000,volume={bed_gain:.2f}dB,{fade}[aud];"
     ticker_in, ticker_graph = _ticker(ch, desk, work, offset, "paged", 2)
     out = work.with_suffix(".ts")
+    voice_in = [a for _, (clip, _) in clips for a in ("-i", str(clip))]
     _encode(["-f", "concat", "-safe", "0", "-i", str(_pages_list(work, frames)), "-stream_loop", "-1",
-             "-i", str(bed), *ticker_in, "-filter_complex", graph + ticker_graph, "-map", "[v]", "-map", "[aud]"],
-            out, length, offset)
+             "-i", str(bed), *ticker_in, *voice_in, "-filter_complex", graph + ticker_graph,
+             "-map", "[v]", "-map", "[aud]"], out, length, offset)
     return out, length

@@ -97,8 +97,12 @@ class Air:
         self.progress = time.time()
         self.count = self.fails_in_row = 0
         timeout = ["-rw_timeout", "15000000"] if out.startswith("rtmp") else []
+        # Sound is encoded once here, as one continuous stream: each chunk's own AAC opens with encoder priming that
+        # overlaps the chunk before it, and copied through it stutters at every junction. aresample trims those
+        # overlaps against the chunks' timestamps, so picture and sound stay in step.
         args = ["ffmpeg", "-hide_banner", "-loglevel", "warning"] + ([] if fast else ["-re"]) + [
-            "-f", "mpegts", "-i", "pipe:0", "-c", "copy", "-bsf:a", "aac_adtstoasc", *timeout, "-f", "flv", out]
+            "-f", "mpegts", "-i", "pipe:0", "-c:v", "copy", "-af", "aresample=async=1:min_hard_comp=0.01",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", *timeout, "-f", "flv", out]
         self.pusher = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         threading.Thread(target=self._relay_log, daemon=True).start()
 
