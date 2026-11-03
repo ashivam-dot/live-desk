@@ -34,6 +34,8 @@ class Channel:
     # importance signals: Google News top-story feeds (in their ranked order) and Google Trends daily searches
     top_stories: tuple[str, ...] = ()
     trends: tuple[str, ...] = ()
+    # the channel's own Shorts from before this date belong to an earlier identity and never air
+    since: str = ""
 
 
 ORBITWIRE = Channel(
@@ -61,6 +63,7 @@ ORBITWIRE = Channel(
                  "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
     trends=("https://trends.google.com/trending/rss?geo=US", "https://trends.google.com/trending/rss?geo=GB",
             "https://trends.google.com/trending/rss?geo=IN"),
+    since="2026-10-09T00:00:00+00:00",
 )
 
 PALPAL = Channel(

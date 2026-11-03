@@ -10,6 +10,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -26,6 +28,10 @@ UA = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) C
 USGS = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson"
 LIBRARY = os.environ.get("LIVE_DESK_LIBRARY",
                          "https://github.com/ashivam-dot/live-desk/releases/download/library/library.json")
+OWN_MAX_AGE_D = 30  # the channel's back catalogue airs for a month; older news is history, not a bulletin
+OWN_PER_SYNC = 6
+OWN_EVERY_S = 900
+YTDLP_FORMAT = "bv*[vcodec^=avc1][height<=1920]+ba[acodec^=mp4a]/b[ext=mp4]/b"
 HEADLINE_MAX_AGE_H = 18
 REFRESH_S = 300
 FEED_TIMEOUT_S = 15
@@ -175,20 +181,89 @@ class Desk:
 
 
 class Library:
-    """The channel's own public Shorts, collected by the librarian workflow into the repo's `library` release."""
+    """The channel's own public Shorts: those the librarian workflow collects into the repo's `library` release,
+    plus (on hosts with yt-dlp) the channel's back catalogue fetched from YouTube itself."""
 
     def __init__(self, ch: Channel, home: Path, manifest_url: str = LIBRARY):
         self.ch, self.dir, self.url = ch, home / "library", manifest_url
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self.own_dir = self.dir / "own"
+        self.own_dir.mkdir(parents=True, exist_ok=True)
         self.index = self.dir / "index.json"
+        self.own_state = self.own_dir / "state.json"
         saved = read_json(self.index, [])
-        self.items: list[dict] = [m for m in saved if isinstance(m, dict) and Path(m.get("path", "")).exists()] \
+        saved = [m for m in saved if isinstance(m, dict) and Path(m.get("path", "")).exists()] \
             if isinstance(saved, list) else []
-        self.synced = 0.0
+        self.shared = [m for m in saved if not m.get("own")]
+        self.own = [m for m in saved if m.get("own")]
+        self.items: list[dict] = saved
+        self.lock = threading.Lock()
+        self.synced = self.own_synced = 0.0
 
-    def _publish(self, keep: list[dict]) -> None:
-        self.items = sorted(keep, key=lambda m: m.get("published_at", ""), reverse=True)
-        write_json(self.index, self.items)
+    def _publish(self, keep: list[dict] | None = None, own: list[dict] | None = None) -> None:
+        """The librarian's Shorts and the channel's back catalogue, as one list newest first (the librarian's copy
+        wins when both have a video)."""
+        with self.lock:
+            self.shared = self.shared if keep is None else keep
+            self.own = self.own if own is None else own
+            ids = {m["video_id"] for m in self.shared}
+            merged = self.shared + [m for m in self.own if m["video_id"] not in ids]
+            self.items = sorted(merged, key=lambda m: m.get("published_at", ""), reverse=True)
+            write_json(self.index, self.items)
+
+    def sync_own(self) -> None:
+        """Download the channel's own public Shorts from the last OWN_MAX_AGE_D days that the librarian no longer
+        holds (its copies expire after 14 days), a few per pass. Needs yt-dlp; hosts without it skip this. A Short
+        the channel no longer lists (removed or private) is deleted here too."""
+        ytdlp = shutil.which("yt-dlp")
+        if not ytdlp or time.time() - self.own_synced < OWN_EVERY_S:
+            return
+        self.own_synced = time.time()
+        listing = subprocess.run([ytdlp, "--flat-playlist", "--print", "%(id)s",
+                                  f"https://www.youtube.com/{self.ch.handle}/shorts"],
+                                 capture_output=True, text=True, timeout=180)
+        ids = [x.strip() for x in listing.stdout.splitlines() if re.fullmatch(r"[\w-]{11}", x.strip())]
+        if listing.returncode != 0 or not ids:
+            return  # YouTube would not say: change nothing
+        since = datetime.fromisoformat(self.ch.since).timestamp() if self.ch.since else 0
+        cutoff = max(time.time() - OWN_MAX_AGE_D * 86400, since)
+        state = read_json(self.own_state, {})
+        state = state if isinstance(state, dict) else {}
+        listed, shared = set(ids), {m["video_id"] for m in self.shared}
+        for vid, meta in list(state.items()):
+            path = self.own_dir / f"{vid}.mp4"
+            if vid not in listed or vid in shared:
+                path.unlink(missing_ok=True)
+                state.pop(vid)
+            elif not meta.get("skip") and datetime.fromisoformat(meta["published_at"]).timestamp() < cutoff:
+                path.unlink(missing_ok=True)
+                state[vid] = {"skip": True}
+        fetched = 0
+        for n, vid in enumerate(ids):
+            if fetched >= OWN_PER_SYNC:
+                break
+            if vid in state or vid in shared:
+                continue
+            fetched += 1
+            path = self.own_dir / f"{vid}.mp4"
+            got = subprocess.run([ytdlp, "--no-progress", "--no-playlist", "-f", YTDLP_FORMAT,
+                                  "--merge-output-format", "mp4", "--match-filter", f"timestamp>={int(cutoff)}",
+                                  "-o", str(self.own_dir / f"{vid}.%(ext)s"),
+                                  "--print", "after_move:%(timestamp)s\t%(title)s",
+                                  f"https://www.youtube.com/shorts/{vid}"], capture_output=True, text=True, timeout=300)
+            line = (got.stdout.strip().splitlines() or [""])[-1]
+            if got.returncode == 0 and path.exists() and "\t" in line:
+                ts, title = line.split("\t", 1)
+                state[vid] = {"channel": self.ch.key, "video_id": vid, "own": True, "path": str(path),
+                              "title": re.sub(r"\s*#\S+", "", title).strip(),
+                              "published_at": datetime.fromtimestamp(int(float(ts)), timezone.utc).isoformat()}
+            elif got.returncode == 0:  # older than the cutoff; the listing runs newest first, so the rest are too
+                for later in ids[n:]:
+                    state.setdefault(later, {"skip": True})
+                break
+            write_json(self.own_state, state)
+            self._publish(own=[m for m in state.values() if not m.get("skip") and Path(m["path"]).exists()])
+        write_json(self.own_state, state)
+        self._publish(own=[m for m in state.values() if not m.get("skip") and Path(m["path"]).exists()])
 
     def sync(self, every_s: float = 1800) -> None:
         if time.time() - self.synced < every_s:

@@ -134,12 +134,30 @@ def update_pages(ch: Channel, desk) -> list[str]:
     return pages + ["follow"]
 
 
+def footage_for(desk, clips: list[dict], turn: int) -> dict | None:
+    """The channel's own Short to play behind an update: the one telling the lead story if there is one, else the
+    clips in turn, so every update shows different original footage."""
+    from .trending import same_story, tokens
+
+    clips = [c for c in clips if Path(c.get("path", "")).exists()]
+    if not clips:
+        return None
+    for row in desk.headlines[:3]:
+        lead = tokens(row["title"])
+        match = next((c for c in clips if same_story(lead, tokens(c.get("title", "")))), None)
+        if match:
+            return match
+    return clips[turn % len(clips)]
+
+
 def update_segment(ch: Channel, desk, work: Path, offset: float, air_at: datetime,
-                   coming: dict | None) -> tuple[Path, float]:
+                   coming: dict | None, library: list[dict] | None = None, turn: int = 0) -> tuple[Path, float]:
     """A full-frame live update between Shorts: the newsreader reads each page while it is up, over the channel's bed
-    (ducked under the voice). Without the voice, a new page every UPDATE_PAGE_S seconds over the bed alone."""
+    (ducked under the voice), with the channel's own footage moving behind the pages. Without the voice, a new page
+    every UPDATE_PAGE_S seconds over the bed alone."""
     work.mkdir(parents=True, exist_ok=True)
     pages = update_pages(ch, desk)
+    footage = footage_for(desk, library or [], turn)
     spoken: list[tuple[Path, float] | None] = [None] * len(pages)
     try:
         for i, text in enumerate(voice.script(ch, pages, desk, air_at, coming)):
@@ -155,13 +173,20 @@ def update_segment(ch: Channel, desk, work: Path, offset: float, air_at: datetim
     frames, start = [], 0.0
     for i, page in enumerate(pages):
         p = work / f"u{i}.png"
-        look.update_page(ch, page, desk, air_at + timedelta(seconds=start), coming).convert("RGB").save(p)
+        img = look.update_page(ch, page, desk, air_at + timedelta(seconds=start), coming, footage=bool(footage))
+        (img if footage else img.convert("RGB")).save(p)
         frames.append((p, holds[i]))
         start += holds[i]
     bed = music.bed(ch, work.parent.parent / "assets")
     bed_gain, _ = measure(bed)
     clips = [(i, s) for i, s in enumerate(spoken) if s]
-    graph = f"[0:v]fps={FPS},format=rgba[paged];"
+    if footage:
+        f = 4 + len(clips)
+        graph = (f"[{f}:v]scale=640:360:force_original_aspect_ratio=increase,crop=640:360,boxblur=4:1,"
+                 f"scale={look.W}:{look.H},eq=brightness=-0.12:saturation=0.9,fps={FPS},format=rgba[foot];"
+                 f"[0:v]fps={FPS},format=rgba[pg];[foot][pg]overlay=0:0:eof_action=repeat[paged];")
+    else:
+        graph = f"[0:v]fps={FPS},format=rgba[paged];"
     fade = f"afade=t=in:d={EDGE_FADE_S},afade=t=out:st={length - 0.6:.3f}:d=0.6"
     if clips:
         graph += (f"[1:a]aresample=48000,volume={bed_gain + BED_UNDER_VOICE_DB:.2f}dB,"
@@ -179,7 +204,8 @@ def update_segment(ch: Channel, desk, work: Path, offset: float, air_at: datetim
     ticker_in, ticker_graph = _ticker(ch, desk, work, offset, "paged", 2)
     out = work.with_suffix(".ts")
     voice_in = [a for _, (clip, _) in clips for a in ("-i", str(clip))]
+    footage_in = ["-stream_loop", "-1", "-i", footage["path"]] if footage else []
     _encode(["-f", "concat", "-safe", "0", "-i", str(_pages_list(work, frames)), "-stream_loop", "-1",
-             "-i", str(bed), *ticker_in, *voice_in, "-filter_complex", graph + ticker_graph,
+             "-i", str(bed), *ticker_in, *voice_in, *footage_in, "-filter_complex", graph + ticker_graph,
              "-map", "[v]", "-map", "[aud]"], out, length, offset)
     return out, length

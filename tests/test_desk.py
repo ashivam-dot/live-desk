@@ -35,11 +35,25 @@ def test_segment_lengths_are_whole_quanta():
 def test_programme_puts_new_shorts_first_and_updates_between():
     lib = FakeLibrary([short("b", "2026-11-01T10:00"), short("a", "2026-11-01T09:00")])
     p = air.Programme(lib)
-    played = [p.next() for _ in range(4)]
-    assert [k for k, _ in played] == ["short", "short", "short", "update"]
+    played = [p.next() for _ in range(5)]
+    assert [k for k, _ in played] == ["short"] * air.SHORTS_PER_UPDATE + ["update"]
     assert [s["video_id"] for _, s in played[:3]] == ["b", "a", "b"]
-    lib.items = [short("c", "2026-11-01T12:00")] + lib.items
+    just_now = datetime.now(timezone.utc).isoformat()
+    lib.items = [short("c", just_now), short("old", "2026-10-12T12:00")] + lib.items
     assert p.next()[1]["video_id"] == "c"
+    assert list(p.order)[-1] == "old"  # the back catalogue joins the end of the rotation
+
+
+def test_updates_show_the_lead_storys_own_footage(tmp_path):
+    clips = []
+    for vid, title in (("x", "Cricket final tonight"), ("y", "Magnitude 7 earthquake strikes Japan coast")):
+        (tmp_path / f"{vid}.mp4").write_bytes(b"0")
+        clips.append({"video_id": vid, "title": title, "path": str(tmp_path / f"{vid}.mp4")})
+    desk = type("D", (), {"headlines": [{"title": "Japan coast earthquake magnitude 7 felt in Tokyo"}]})()
+    assert segments.footage_for(desk, clips, 0)["video_id"] == "y"
+    desk.headlines = [{"title": "Parliament debates budget"}]
+    assert [segments.footage_for(desk, clips, t)["video_id"] for t in (0, 1)] == ["x", "y"]
+    assert segments.footage_for(desk, [], 0) is None
 
 
 def test_programme_skips_bad_and_falls_back_to_updates():

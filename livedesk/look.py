@@ -238,13 +238,18 @@ def short_frame(ch: Channel, short: dict, page: str, desk, at: datetime, coming:
     return img
 
 
-def update_page(ch: Channel, page: str, desk, at: datetime, coming: dict | None) -> Image.Image:
-    """A full-frame live-update page shown between Shorts."""
-    img = Image.new("RGBA", (W, H), ch.bg + (255,))
+FOOTAGE_ALPHA = 178  # how much of the page covers the channel's own footage playing behind an update
+
+
+def update_page(ch: Channel, page: str, desk, at: datetime, coming: dict | None,
+                footage: bool = False) -> Image.Image:
+    """A full-frame live-update page shown between Shorts; see-through when footage plays behind it."""
+    alpha = FOOTAGE_ALPHA if footage else 255
+    img = Image.new("RGBA", (W, H), ch.bg + (alpha,))
     d = ImageDraw.Draw(img)
     for i in range(H):  # a soft vertical light, so the page is never a flat slab of colour
         shade = int(28 * (1 - abs(i - H * 0.35) / H))
-        d.line((0, i, W, i), fill=tuple(min(255, c + shade) for c in ch.bg))
+        d.line((0, i, W, i), fill=tuple(min(255, c + shade) for c in ch.bg) + (alpha,))
     brand_bar(img, ch)
     ticker_band(d, ch)
     big = font(ch.head_font, 30)

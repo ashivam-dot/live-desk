@@ -30,7 +30,8 @@ from .sources import Desk, Library, write_json
 INGEST = {"rtmp": "rtmp://a.rtmp.youtube.com/live2/",
           "rtmps": "rtmps://a.rtmps.youtube.com:443/live2/"}  # for hosts that only allow outgoing 443
 LEAD_S = 240
-SHORTS_PER_UPDATE = 3
+SHORTS_PER_UPDATE = 4
+NEW_SHORT_H = 24  # a Short published this recently airs next when it arrives; an older one joins the rotation
 FETCH_EVERY_S = 30
 STALL_S = 300  # longer than any segment: nothing aired for this long means the stream is dead
 MAX_FAILS_IN_ROW = 5
@@ -50,11 +51,16 @@ class Programme:
 
     def refresh(self) -> None:
         items = {m["video_id"]: m for m in self.library.items if self.fails[m["video_id"]] < BENCH_AFTER}
+        first_load = not self.known
         fresh = [v for v in items if v not in self.known]
         self.known = set(items)
         self.order = deque([v for v in self.order if v in items])
+        cutoff = datetime.now(timezone.utc).timestamp() - NEW_SHORT_H * 3600
         for v in reversed(fresh):  # newest first, ahead of the rotation
-            self.order.appendleft(v)
+            if first_load or _published(items[v]) > cutoff:
+                self.order.appendleft(v)
+            else:  # an older Short the library just gained (the channel's back catalogue) waits its turn
+                self.order.append(v)
         if not self.order:
             self.order.extend(items)
         self.items = items
@@ -76,6 +82,13 @@ class Programme:
     def failed(self, video_id: str) -> None:
         self.fails[video_id] += 1
         self.order = deque(v for v in self.order if v != video_id)
+
+
+def _published(item: dict) -> float:
+    try:
+        return datetime.fromisoformat(item.get("published_at", "")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def redact(text: str, secret: str | None) -> str:
@@ -121,6 +134,14 @@ class Air:
                     print(f"fetch {job.__qualname__} failed: {type(exc).__name__}: {exc}"[:300], flush=True)
             time.sleep(FETCH_EVERY_S)
 
+    def _own(self) -> None:
+        while True:
+            try:
+                self.library.sync_own()
+            except Exception as exc:  # the back catalogue is extra; the librarian's Shorts keep airing
+                print(f"own Shorts sync failed: {type(exc).__name__}: {exc}"[:300], flush=True)
+            time.sleep(FETCH_EVERY_S)
+
     def air_at(self) -> datetime:
         """When the segment being built now goes on air (the pusher reads at real time from `started`)."""
         return datetime.fromtimestamp((self.started or time.time()) + self.offset, timezone.utc)
@@ -136,7 +157,7 @@ class Air:
                                                       self.programme.peek())
             else:
                 path, length = segments.update_segment(self.ch, self.desk, work, self.offset, self.air_at(),
-                                                       self.programme.peek())
+                                                       self.programme.peek(), self.library.items, self.count)
         except Exception as exc:  # a bad file or a failed encode costs one segment, never the stream
             print(f"segment {work.name} failed: {type(exc).__name__}: {exc}"[:300], flush=True)
             out.unlink(missing_ok=True)
@@ -173,6 +194,7 @@ class Air:
 
     def run(self, minutes: float | None) -> int:
         threading.Thread(target=self._fetch, daemon=True).start()
+        threading.Thread(target=self._own, daemon=True).start()
         time.sleep(0 if self.desk.headlines else 15)  # a cold start gets a moment to fetch its first headlines
         self.build_one()
         feeder = threading.Thread(target=self.feed, daemon=True)
