@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from livedesk import air, look, segments, sources, voice  # noqa: E402
+from livedesk import air, look, segments, sources, trending, voice  # noqa: E402
 from livedesk.channels import CHANNELS  # noqa: E402
 
 AT = datetime(2026, 11, 1, 15, 0, tzinfo=timezone.utc)
@@ -144,6 +144,44 @@ def test_frames_render(key):
     strip, (label, label_w) = look.ticker_strip(ch, desk), look.ticker_label(ch)
     assert strip.height == label.height == look.TICKER_H and strip.width > look.W and 60 < label_w < 300
     assert look.SHORT_W * 16 == look.SHORT_H * 9 and look.SHORT_W % 2 == 0
+
+
+def test_widely_covered_trending_stories_lead():
+    now = datetime(2026, 11, 3, 19, 0, tzinfo=timezone.utc)
+    at = lambda h: (now.timestamp() - h * 3600)  # noqa: E731
+    iso = lambda h: datetime.fromtimestamp(at(h), timezone.utc).isoformat()  # noqa: E731
+    feeds = [[{"title": "Local bakery wins regional bread award", "outlet": "A", "at": iso(0.1)},
+              {"title": "Earthquake of magnitude 7 strikes off Japan coast", "outlet": "A", "at": iso(0.5)}],
+             [{"title": "Powerful magnitude 7 earthquake strikes Japan coast, tsunami warning", "outlet": "B",
+               "at": iso(0.4)},
+              {"title": "Senate passes budget bill after long debate", "outlet": "B", "at": iso(5)}],
+             [{"title": "Japan coast earthquake: magnitude 7 tremor felt in Tokyo", "outlet": "C", "at": iso(0.3)}]]
+    top = [{"title": "Senate passes budget bill in late vote", "outlet": "D", "at": iso(4), "top": 1.0}]
+    trends = [{"term": "budget bill", "traffic": 200000, "news": []}]
+    ranked = trending.rank(feeds, top, trends, 10, "en", now=now.timestamp())
+    # Google's lead story with a search spike leads; the fresh quake three outlets carry is next and breaking
+    assert [r["coverage"] for r in ranked] == [2, 3, 1]
+    assert "Senate" in ranked[0]["title"] and ranked[0]["outlet"] == "B" and not ranked[0]["breaking"]
+    assert "earthquake" in ranked[1]["title"].lower() and ranked[1]["breaking"] and ranked[1]["outlet"] in "ABC"
+    assert "bakery" in ranked[2]["title"]
+
+
+def test_google_feeds_parse():
+    top = trending.parse_top_stories(b"""<rss><channel>
+      <item><title>Big story here - Reuters</title><source url="x">Reuters</source>
+        <pubDate>Tue, 03 Nov 2026 18:00:00 GMT</pubDate></item>
+      <item><title>Second story - BBC</title><pubDate>Tue, 03 Nov 2026 17:00:00 GMT</pubDate></item>
+    </channel></rss>""")
+    assert [(r["title"], r["outlet"], r["top"]) for r in top] == [("Big story here", "Reuters", 1.0),
+                                                                   ("Second story", "BBC", 0.5)]
+    trends = trending.parse_trends("""<rss xmlns:ht="https://trends.google.com/trending/rss"><channel><item>
+      <title>man utd vs roma</title><ht:approx_traffic>10,000+</ht:approx_traffic>
+      <ht:news_item><ht:news_item_title>Man Utd v Roma live</ht:news_item_title>
+        <ht:news_item_source>BBC</ht:news_item_source></ht:news_item>
+    </item></channel></rss>""".encode())
+    assert trends == [{"term": "man utd vs roma", "traffic": 10000,
+                       "news": [{"title": "Man Utd v Roma live", "outlet": "BBC"}]}]
+    assert trending.traffic("2M+") == 2_000_000 and trending.traffic("") == 0
 
 
 def test_headlines_read_like_a_newsreader():

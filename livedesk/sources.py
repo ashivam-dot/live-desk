@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from . import trending
 from .channels import Channel
 
 UA = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
@@ -134,11 +135,16 @@ class Desk:
     def refresh(self, force: bool = False) -> None:
         if not force and time.time() - self.fetched < REFRESH_S:
             return
-        self.fetched, errors, lists = time.time(), [], []
-        pool = ThreadPoolExecutor(max_workers=8)
+        self.fetched, errors, lists, top, trends = time.time(), [], [], [], []
+        cutoff = time.time() - HEADLINE_MAX_AGE_H * 3600
+        pool = ThreadPoolExecutor(max_workers=12)
         jobs = {pool.submit(self._feed, o, u): o for o, u in self.ch.feeds}
         if self.ch.quakes:
             jobs[pool.submit(lambda: quakes_from(get(USGS, timeout=FEED_TIMEOUT_S)))] = "USGS"
+        for url in self.ch.top_stories:
+            jobs[pool.submit(lambda u=url: trending.parse_top_stories(get(u, timeout=FEED_TIMEOUT_S)))] = "top"
+        for url in self.ch.trends:
+            jobs[pool.submit(lambda u=url: trending.parse_trends(get(u, timeout=FEED_TIMEOUT_S)))] = "trends"
         try:
             for job in as_completed(jobs, timeout=REFRESH_DEADLINE_S):
                 try:
@@ -148,12 +154,21 @@ class Desk:
                     continue
                 if jobs[job] == "USGS":
                     self.quakes = rows
+                elif jobs[job] == "top":
+                    top += [r for r in rows if not r["at"] or datetime.fromisoformat(r["at"]).timestamp() > cutoff]
+                elif jobs[job] == "trends":
+                    trends += rows
                 else:
                     lists.append(rows)
         except FuturesTimeout:
             errors.append("some feeds too slow")
         pool.shutdown(wait=False, cancel_futures=True)
-        if fresh := interleave(lists, 24):
+        try:
+            fresh = trending.rank(lists, top, trends, 24, self.ch.lang) if lists or top else []
+        except Exception as exc:  # ranking is a refinement: the plain rotation still airs
+            errors.append(f"ranking: {type(exc).__name__}")
+            fresh = interleave(lists, 24)
+        if fresh:
             self.headlines = fresh
         self.errors = errors
         write_json(self.cache, {"headlines": self.headlines, "quakes": self.quakes})

@@ -31,6 +31,9 @@ class Channel:
     ticker_band: tuple[int, int, int]
     ticker_ink: tuple[int, int, int]
     words: dict = field(default_factory=dict)
+    # importance signals: Google News top-story feeds (in their ranked order) and Google Trends daily searches
+    top_stories: tuple[str, ...] = ()
+    trends: tuple[str, ...] = ()
 
 
 ORBITWIRE = Channel(
@@ -53,6 +56,11 @@ ORBITWIRE = Channel(
            "update": "LIVE UPDATE", "follow": "Follow Orbitwire for the world's biggest stories",
            "full": "Full story on the channel", "published": "Published", "clocks": "WORLD TIME",
            "source": "Headlines: {outlets}. Quakes: USGS.", "next": "Coming up", "subscribe": "SUBSCRIBE"},
+    top_stories=("https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
+                 "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-GB&gl=GB&ceid=GB:en",
+                 "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
+    trends=("https://trends.google.com/trending/rss?geo=US", "https://trends.google.com/trending/rss?geo=GB",
+            "https://trends.google.com/trending/rss?geo=IN"),
 )
 
 PALPAL = Channel(
@@ -73,6 +81,9 @@ PALPAL = Channel(
            "follow": "हर बड़ी खबर सबसे पहले, पल पल न्यूज़ पर", "full": "पूरी खबर चैनल पर",
            "published": "प्रकाशित", "clocks": "भारत समय", "source": "स्रोत: {outlets}", "next": "आगे",
            "subscribe": "सब्सक्राइब करें", "zone": ""},
+    top_stories=("https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi",
+                 "https://news.google.com/rss/headlines/section/topic/NATION?hl=hi&gl=IN&ceid=IN:hi"),
+    trends=("https://trends.google.com/trending/rss?geo=IN",),
 )
 
 CHANNELS = {c.key: c for c in (ORBITWIRE, PALPAL)}

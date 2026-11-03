@@ -35,6 +35,7 @@ WORDS = {
         "more": ["Also making news.", "Elsewhere.", "In other stories.", "And there is more."],
         "by": ["{outlet} reports that {title}", "According to {outlet}, {title}", "{title}, {outlet} reports.",
                "{title}."],
+        "breaking": "Breaking news.",
         "quake_one": "The strongest earthquake in the last day was magnitude {mag}, {place}.",
         "quake_none": "No major earthquakes in the last day.",
         "next": ["Coming up next: {title}.", "Next on Orbitwire: {title}.", "Stay with us. Next, {title}."],
@@ -52,6 +53,7 @@ WORDS = {
         "more": ["दूसरी बड़ी खबर।", "अब बात करते हैं एक और खबर की।", "इसके अलावा।", "और अब आगे।"],
         "by": ["{outlet} के मुताबिक, {title}", "{title}। यह खबर {outlet} से।", "{title}।",
                "{outlet} की रिपोर्ट के अनुसार, {title}"],
+        "breaking": "ब्रेकिंग न्यूज़।",
         "quake_one": "",
         "quake_none": "",
         "next": ["आगे देखिए: {title}।", "अब देखिए: {title}।", "बने रहिए हमारे साथ। आगे, {title}।"],
@@ -106,6 +108,8 @@ def _headline(ch: Channel, row: dict, seed: str) -> str:
     line = _pick(w["by"], seed + title).format(outlet=row.get("outlet", ""), title=title)
     if not line.rstrip().endswith((".", "?", "!", "।")):
         line += "।" if ch.lang == "hi" else "."
+    if row.get("breaking"):
+        line = w["breaking"] + " " + line
     return re.sub(r"([?!])\s*[।.]", r"\1", line)
 
 
